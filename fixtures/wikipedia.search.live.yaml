@@ -1,0 +1,87 @@
+schema_version: 1
+name: wikipedia.search
+description: Compiled from 7 recorded tool calls
+kind: leaf
+domain: wikipedia
+tags:
+  - wikipedia
+  - forge-compiled
+inputs:
+  search:
+    type: string
+    required: true
+    description: Text for "Search Wikipedia"
+forbidden:
+  locators:
+    - role: button
+      name: /^Remove$/i
+steps:
+  - id: open_app
+    goal: Open https://en.wikipedia.org/wiki/Special:Search
+    do: navigate
+    with:
+      url: https://en.wikipedia.org/wiki/Special:Search
+    expect:
+      url_matches: /wiki/Special:Search
+      timeout_ms: 10000
+  - id: wait_search_wikipedia
+    goal: Wait until "Search Wikipedia" is ready
+    do: wait
+    locator:
+      attr:
+        name: name
+        value: search
+      role: combobox
+    with:
+      timeout_ms: 10000
+  - id: fill_search_wikipedia
+    goal: Type search into "Search Wikipedia"
+    do: type
+    locator:
+      attr:
+        name: name
+        value: search
+      role: combobox
+    with:
+      text: "{{search}}"
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: click_search
+    goal: Click "Search"
+    do: click
+    locator:
+      role: button
+      attr:
+        name: type
+        value: submit
+      name: /^(?!.*(?:Remove)).*$/i
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: click_search_match
+    goal: Click "{{search}}"
+    do: click
+    locator:
+      role: link
+      name: /^{{search}}$/i
+      nth: 0
+    expect:
+      url_matches: /wiki/.+
+      timeout_ms: 5000
+    fallback:
+      strategy: relocate_then_llm
+      relocate:
+        widen_name: true
+        consider_text: true
+      budget:
+        tool_calls: 4
+        tokens: 4000
+meta:
+  version: 1
+  created: 2026-11-07T10:47:47.796Z
+  status: draft

@@ -1,0 +1,54 @@
+schema_version: 1
+name: todomvc.add_todo
+description: Compiled from 10 recorded tool calls
+kind: leaf
+domain: todomvc
+tags:
+  - todomvc
+  - forge-compiled
+inputs:
+  new_todo_input:
+    type: string
+    required: true
+    description: Text for "New Todo Input"
+steps:
+  - id: open_app
+    goal: Open https://todomvc.com/examples/react/dist/
+    do: navigate
+    with:
+      url: https://todomvc.com/examples/react/dist/
+    expect:
+      url_matches: /examples/react/dist/
+      timeout_ms: 10000
+  - id: wait_new_todo_input
+    goal: Wait until "New Todo Input" is ready
+    do: wait
+    locator:
+      data_testid: text-input
+    with:
+      timeout_ms: 10000
+  - id: fill_new_todo_input
+    goal: Type new_todo_input into "New Todo Input"
+    do: type
+    locator:
+      data_testid: text-input
+    with:
+      text: "{{new_todo_input}}"
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: press_enter
+    goal: Press Enter
+    do: press
+    with:
+      keys:
+        - Enter
+    expect:
+      dom_added_min: 1
+      timeout_ms: 5000
+meta:
+  version: 1
+  created: 2026-11-07T10:46:15.535Z
+  status: draft

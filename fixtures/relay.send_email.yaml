@@ -45,7 +45,6 @@ steps:
     do: navigate
     with:
       url: http://127.0.0.1:4317/demo/
-      wait_for_load: false
     expect:
       url_matches: /demo/
       timeout_ms: 10000

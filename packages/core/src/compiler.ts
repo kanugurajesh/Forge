@@ -64,6 +64,8 @@ export interface CompileResult {
 
 const DESTRUCTIVE_CONTROL = /^(delete|discard|remove|trash|archive|unsubscribe|deactivate|close account|cancel (plan|subscription)|leave|revoke|reset)\b/i;
 const SEND_CONTROL = /^(send|reply|post|submit|comment|publish|share|invite)\b/i;
+/** Tools whose call replaces the runtime's ref cache for the tab. */
+const REF_DEFINING = new Set(["browser_read", "browser_quick_read"]);
 const STATIC_ASSET = /\.(js|css|png|jpe?g|gif|svg|woff2?|ico|map)(\?|$)/i;
 
 interface Draft {
@@ -196,6 +198,8 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
   let snapshot: SnapshotNode[] = [];
   let firstUrl: string | undefined;
   let lastMutatingSeq = -1;
+  let refsLostAt: number | undefined;
+  let snapshotScope: string | undefined;
 
   const drop = (c: ToolCall, reason: DropReason, detail: string) =>
     events.push({ seq: c.seq, tool: c.tool, decision: "dropped", reason, detail, tokens: estimateTokens(c) });
@@ -209,7 +213,16 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
     const preSnapshot = snapshot;
     if (r?.snapshot && r.snapshot.length > 0) {
       snapshot = r.snapshot;
+      refsLostAt = undefined;
+      const sel = call.args.selector ?? (String(call.args.scope ?? "").startsWith("ref:") ? call.args.scope : undefined);
+      snapshotScope = typeof sel === "string" ? sel : undefined;
       for (const n of r.snapshot) seen.set(`${n.role}|${n.name}|${n.dialog ?? ""}`, n);
+    } else if (REF_DEFINING.has(call.tool)) {
+      // The runtime replaced its ref cache, but this transcript can't show with what
+      // (result too large for the client, empty viewport read, quick_read matches only).
+      // Refs used after this point name elements we can't identify.
+      snapshot = [];
+      refsLostAt = call.seq;
     }
 
     // Live agents usually open the app with browser_new_tab {url}, not browser_navigate.
@@ -285,7 +298,13 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
 
     const needsTarget = verb !== "press" && verb !== "scroll";
     if (needsTarget && !node) {
-      drop(call, "unreplayable", `ref ${String(call.args.ref ?? call.args.text)} not found in the preceding snapshot`);
+      drop(
+        call,
+        "unreplayable",
+        refsLostAt !== undefined && preSnapshot.length === 0
+          ? `ref ${String(call.args.ref ?? call.args.text)} comes from the read at seq ${refsLostAt}, whose output isn't in the transcript`
+          : `ref ${String(call.args.ref ?? call.args.text)} not found in the preceding snapshot`,
+      );
       warnings.push(`seq ${call.seq}: could not map target to a semantic locator`);
       continue;
     }
@@ -297,6 +316,8 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
       locator = p.locator;
       tier = p.tier;
       for (const w of p.warnings) warnings.push(`${node.role} "${node.name}": ${w}`);
+      if (snapshotScope && p.tier > 1)
+        warnings.push(`${node.role} "${node.name}": uniqueness was only checked inside the read scoped to ${snapshotScope}; read the whole page to be sure`);
     }
 
     const label =
@@ -327,9 +348,14 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
       step.goal = `Type ${inputName} into "${label}"`;
       step.id = uniqueId(`fill_${slug(label, 30)}`, ids);
     } else if (verb === "press") {
-      step.with = { key: call.args.key, ...(call.args.modifiers ? { modifiers: call.args.modifiers } : {}) };
-      step.goal = `Press ${String(call.args.key)}`;
-      step.id = uniqueId(`press_${slug(String(call.args.key ?? "key"), 20)}`, ids);
+      // Live BrowserOps: browser_press {keys: ["Primary", "KeyA"]} (modifiers first, key last).
+      const keys = Array.isArray(call.args.keys) ? (call.args.keys as string[]) : undefined;
+      const keyName = keys ? keys[keys.length - 1] : String(call.args.key ?? "key");
+      step.with = keys
+        ? { keys }
+        : { key: call.args.key, ...(call.args.modifiers ? { modifiers: call.args.modifiers } : {}) };
+      step.goal = `Press ${keys ? keys.join("+") : keyName}`;
+      step.id = uniqueId(`press_${slug(keyName, 20)}`, ids);
     } else if (verb === "scroll") {
       const { tab_id: _t, ...rest } = call.args;
       step.with = rest;
@@ -369,10 +395,9 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
   const navIdx = drafts.findIndex((d) => d.step.do === "navigate");
   if (navIdx >= 0) {
     const entry = drafts[navIdx + 1];
-    if (entry?.step.locator && entry.step.do === "click") {
-      // The wait step below gates readiness, so the navigate needn't block on the load event.
-      // Live BrowserOps 0.0.11 misses load completion on fast pages and hangs 45s otherwise.
-      drafts[navIdx].step.with = { ...drafts[navIdx].step.with, wait_for_load: false };
+    if (entry?.step.locator && (entry.step.do === "click" || entry.step.do === "type")) {
+      // Keep the navigate's own load wait: a BrowserOps `wait` step locates first and only then
+      // waits on the ref, and strict refuses every fallback, so the load wait is what gates readiness.
       drafts.splice(navIdx + 1, 0, {
         step: {
           id: uniqueId(`wait_${slug(entry.node?.name ?? "entry", 30)}`, ids),
@@ -426,6 +451,38 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
     if (forbiddenNames.has(key) || forbidden.length >= 10) continue;
     forbiddenNames.add(key);
     forbidden.push({ role: n.role, name: anchoredName(n.name) });
+  }
+
+  // ---- data-dependent targets: a typed value that reappears in a later locator or expect
+  //      (search "Ada Lovelace" → click the "Ada Lovelace" result → land on /wiki/Ada_Lovelace).
+  //      BrowserOps substitutes {{inputs}} inside locators but not inside expects, so lift it in
+  //      locators and generalise it to ".+" in expects. Baking the sample in would replay one query forever.
+  for (const [k, v] of Object.entries(samples)) {
+    if (v.trim().length < 3) continue;
+    const forms = [...new Set([v, escapeRegex(v), v.replace(/ /g, "_"), escapeRegex(v.replace(/ /g, "_")), encodeURIComponent(v), v.replace(/ /g, "+")])];
+    const sub = (s: string, to: string) => forms.reduce((acc, f) => acc.split(f).join(to), s);
+    for (const d of drafts) {
+      if (d.inputName === k) continue; // the step that typed it
+      const loc = d.step.locator;
+      if (loc) {
+        for (const field of ["name", "has_text", "aria_label", "href"] as const) {
+          const cur = loc[field];
+          if (typeof cur === "string" && sub(cur, "\u0000") !== cur) {
+            loc[field] = sub(cur, `{{${k}}}`);
+            warnings.push(`${d.step.id}: ${field} depends on input "${k}" (lifted to {{${k}}}); a value with regex characters needs escaping`);
+          }
+        }
+      }
+      const ex = d.step.expect as Record<string, unknown> | undefined;
+      if (ex) for (const [ek, ev] of Object.entries(ex)) if (typeof ev === "string" && sub(ev, "\u0000") !== ev) ex[ek] = sub(ev, ".+");
+      // Keep the sample out of ids and goals too ("click_ada_lovelace" → "click_search_match").
+      if (d.step.goal) d.step.goal = sub(d.step.goal, `{{${k}}}`);
+      const vs = slug(v, 30);
+      if (vs && d.step.id.includes(vs)) {
+        ids.delete(d.step.id);
+        d.step.id = uniqueId(d.step.id.replace(vs, `${slug(k, 20)}_match`), ids);
+      }
+    }
   }
 
   // ---- satisfy BrowserOps' static forbidden guard: it compares only role + name, so a

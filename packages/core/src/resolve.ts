@@ -58,6 +58,8 @@ export function proposeLocator(target: SnapshotNode, snapshot: SnapshotNode[]): 
   if (a.name) raw.push({ attr: { name: "name", value: a.name } });
   if (a.id && !/\d{3,}|^:r|^radix-|^headlessui-/.test(a.id)) raw.push({ attr: { name: "id", value: a.id } });
   if (a.href && target.role === "link") raw.push({ role: "link", href: a.href });
+  // The one submit button of a form is a stable, contract-level handle (no copy involved).
+  if (target.role === "button" && a.type === "submit") raw.push({ role: "button", attr: { name: "type", value: "submit" } });
   if (target.name) raw.push({ role: target.role, name: anchoredName(target.name) });
   if (target.text && target.text !== target.name) raw.push({ role: target.role, has_text: anchoredName(target.text) });
 
@@ -81,8 +83,22 @@ export function proposeLocator(target: SnapshotNode, snapshot: SnapshotNode[]): 
   // Fall through to positional: role + name + nth.
   const base: Locator = target.name ? { role: target.role, name: anchoredName(target.name) } : { role: target.role };
   const pool = resolveLocator(snapshot, base);
-  const idx = Math.max(0, pool.findIndex((n) => n.ref === target.ref));
+  let idx = Math.max(0, pool.findIndex((n) => n.ref === target.ref));
+  // Links that all go to the same place (a result's thumbnail + title) are interchangeable:
+  // take the first, which survives the second one disappearing.
+  const equivalent = !!a.href && pool.length > 1 && pool.every((n) => n.attrs?.href === a.href);
+  if (equivalent) idx = 0;
   const locator = { ...base, nth: idx };
+  if (equivalent) {
+    return {
+      unique: true,
+      locator,
+      tier: 3,
+      fragile: false,
+      warnings: [`${pool.length} equivalent links to ${a.href}; the first is used`],
+      candidates,
+    };
+  }
   return {
     unique: false,
     locator,

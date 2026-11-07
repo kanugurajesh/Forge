@@ -13,7 +13,7 @@ Forge compiles one recorded agent run into a deterministic [BrowserOps](https://
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-runner-2EAD33?logo=playwright&logoColor=white)
 ![React](https://img.shields.io/badge/React-Hub%20UI-61DAFB?logo=react&logoColor=black)
-![Tests](https://img.shields.io/badge/tests-35%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
 
 <img src="docs/images/hub-registry.png" alt="Forge Hub registry: two trusted procedures with health, run counts and agent-vs-replay token cost" width="900">
 
@@ -47,7 +47,7 @@ npx playwright install chromium
 
 npm run demo                    # full lifecycle in a real headless browser (≈1 min)
 npm run build && npm run hub    # Hub UI at http://127.0.0.1:4317
-npm test                        # 35 tests: core, live-runtime compat, Hub API, real-browser runner
+npm test                        # 38 tests: core, live-runtime + real-site compat, Hub API, real-browser runner
 ```
 
 | Command | What it does |
@@ -338,6 +338,28 @@ npm run forge -- compile run.mcp.jsonl --name relay.send_email
 | A validation toast (*"Add a recipient"*) satisfies `dom_added_min`, so a failed send reported `completed: true` | A submit inside a surface opened earlier must show that surface closed (`text_invisible`) |
 | `strict` refuses **every** fallback, relocation included | Forge's runner now does the same. Trust needs strict runs, and drift shows up in non-strict runs. |
 
+### Real sites: TodoMVC and Wikipedia
+
+The same pipeline (agent run through BrowserOps → export → compile → `procedures_save` → strict `procedures_execute`) on two third-party sites:
+
+| Site | Recorded | Compiled | On the BrowserOps runtime |
+|---|---|---|---|
+| [TodoMVC (React)](https://todomvc.com/examples/react/dist/): add a todo | 10 calls | 4 steps: open → wait for input → type → Enter, all tier 1 (`data-testid`) | **3 of 3 strict runs completed**, every step `first_try`, no LLM |
+| Wikipedia: search → open the matching article | 7 calls | 5 steps; the result link is `{role: link, name: /^{{search}}$/i}` | Steps 1–4 passed with a query the recording never saw ("Grace Hopper"), and `{{search}}` was substituted in the locator. That run exposed the two-Search-buttons ambiguity, now fixed. The 3 strict runs are still pending: the extension hit issue 3 again. |
+
+Recordings and compiled procedures: [`todomvc-add-todo.live.mcp.jsonl`](fixtures/todomvc-add-todo.live.mcp.jsonl) → [`todomvc.add_todo.live.yaml`](fixtures/todomvc.add_todo.live.yaml), [`wikipedia-search.live.mcp.jsonl`](fixtures/wikipedia-search.live.mcp.jsonl) → [`wikipedia.search.live.yaml`](fixtures/wikipedia.search.live.yaml). Export one site's calls with `--session <name>`, which slices the transcript on `browser_set_session_name`.
+
+What the real sites exposed in Forge, all fixed and covered by tests:
+
+| Found on | Problem | Fix |
+|---|---|---|
+| TodoMVC | Live `browser_press` sends `keys: ["Enter"]`, so Forge compiled "Press undefined" | The compiler and Forge's runner read `keys` (`Primary` → `ControlOrMeta`) |
+| TodoMVC | A React app renders after load | The entry `wait` step now also comes before a first *type* step |
+| Wikipedia | The result to click is named after the query, so a copied locator replays "Ada Lovelace" forever | Typed values that reappear are lifted to `{{search}}` in locators (BrowserOps substitutes there) and generalized to `.+` in expects (it doesn't). Ids and goals no longer contain sample text. |
+| Wikipedia | Two "Search" buttons page-wide; uniqueness had only been checked inside a read scoped to the form | Prefer the form's `type=submit` button; warn when a read was scoped |
+| Wikipedia | A result's thumbnail and title are two links to the same `href` | Equivalent links → `nth: 0` |
+| Wikipedia, [messy first attempt](fixtures/wikipedia-messy.live.mcp.jsonl) | A read too large for the client replaced the runtime's refs, but the transcript doesn't show them. The next type and click hit unknown elements. | Refs after a ref-defining read with no captured snapshot are unknown, and actions using them are dropped as unreplayable. A failed run doesn't become a fake procedure. |
+
 **Issues in BrowserOps 0.0.11 itself** (reproduced, with log lines and source locations):
 
 1. **The forbidden guard rejects locators BrowserOps itself proposes.** `browser_propose_locator` returns `{data_testid: "compose-button"}`. `locatorOverlaps` (bridge `procedures/forbidden.ts`) treats any descriptor without `role` and `name` as overlapping, so a `{role: button, name: /^Archive$/i}` entry under `forbidden` blocks it.
@@ -345,6 +367,10 @@ npm run forge -- compile run.mcp.jsonl --name relay.send_email
 3. **`browser_navigate` replies arrive one navigation late.** On a fast local page, the reply comes back as an `orphan` only when the *next* navigation starts, so the first call times out at 45 s. `wait_for_load: false` and `observe_effects: false` don't help. Reloading the extension clears it for a while.
 4. **Relocation adds `has_text: "click"`**, which seems to come from the step's verb, so `widen_name` can't match the renamed button.
 5. **`procedures_resume`** expects `{kind: "resume_with", with: {locator}}`. The tool description reads like `{kind, locator}`, and that form is silently ignored.
+6. **Locator `near` is accepted but ignored.** `{role: button, name: /^Search$/i, near: {locator: <search box>, radius_px: 250}}` returns the same 2 matches as without `near`.
+7. **Smaller detection gaps.** A default `scope: "viewport"` read returns an empty tree on TodoMVC, while `scope: "document"` returns 23 nodes. A click that navigates (Wikipedia's search button) reports `url.changed: false`. `data:` URLs show up in captured endpoints as `nullimage/svg+xml,…`. One navigate failed with `INTERNAL: Navigation rejected`.
+
+The full write-up, with repro steps and suggested fixes, is the separate bug report.
 
 ## Honest notes
 

@@ -199,7 +199,7 @@ describe("live BrowserOps compatibility", () => {
 
   it("makes a dialog submit prove the dialog closed (a validation toast also adds DOM)", () => {
     expect(live.procedure.steps.find((s) => s.id === "click_send")?.expect).toEqual({ text_invisible: "/^Send$/m", timeout_ms: 5000 });
-    expect(live.procedure.steps[0].with).toMatchObject({ wait_for_load: false });
+    expect(live.procedure.steps[0].with).not.toHaveProperty("wait_for_load"); // strict runs rely on the load wait
   });
 });
 
@@ -211,5 +211,37 @@ describe("forbidden guard port", () => {
     expect(forbiddenOverlaps(archive, { aria_label: "Message body", role: "textbox" })).toBe(false);
     expect(forbiddenOverlaps(archive, { role: "button", name: "/^Send$/i" })).toBe(false);
     expect(forbiddenOverlaps(archive, { role: "button", name: "/^Archive$/i" })).toBe(true);
+  });
+});
+
+describe("real sites (live BrowserOps recordings)", () => {
+  const load = (f: string, name: string) =>
+    compileTrajectory(parseTrajectory(readFileSync(new URL(`../../../fixtures/${f}`, import.meta.url), "utf8")), { name, now: "2026-11-07T00:00:00Z" });
+
+  it("TodoMVC: reads live press {keys}, waits for the SPA before typing", () => {
+    const t = load("todomvc-add-todo.live.mcp.jsonl", "todomvc.add_todo");
+    expect(t.procedure.steps.map((s) => s.id)).toEqual(["open_app", "wait_new_todo_input", "fill_new_todo_input", "press_enter"]);
+    const press = t.procedure.steps.find((s) => s.id === "press_enter")!;
+    expect(press.with).toEqual({ keys: ["Enter"] });
+    expect(press.expect).toMatchObject({ dom_added_min: 1 });
+    expect(t.procedure.steps[2].locator).toEqual({ data_testid: "text-input" });
+  });
+
+  it("Wikipedia: lifts the query into the result locator and keeps it out of the YAML", () => {
+    const w = load("wikipedia-search.live.mcp.jsonl", "wikipedia.search");
+    expect(w.samples).toEqual({ search: "Ada Lovelace" });
+    expect(w.yaml).not.toMatch(/ada|lovelace/i);
+    const result = w.procedure.steps.find((s) => s.id === "click_search_match")!;
+    expect(result.locator).toMatchObject({ role: "link", name: "/^{{search}}$/i", nth: 0 });
+    expect(result.expect?.url_matches).toBe("/wiki/.+");
+    // Two "Search" buttons exist page-wide; the form's submit button is the stable handle.
+    expect(w.procedure.steps.find((s) => s.id === "click_search")!.locator).toMatchObject({ role: "button", attr: { name: "type", value: "submit" } });
+  });
+
+  it("Wikipedia (messy run): refuses refs defined by a read missing from the transcript", () => {
+    const m = load("wikipedia-messy.live.mcp.jsonl", "wikipedia.search");
+    const lost = m.events.filter((e) => e.reason === "unreplayable" && /isn't in the transcript/.test(e.detail));
+    expect(lost.map((e) => e.tool)).toEqual(["browser_type", "browser_click"]);
+    expect(m.procedure.steps.some((s) => s.do === "type")).toBe(false); // the failed run doesn't become a fake procedure
   });
 });

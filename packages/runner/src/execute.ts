@@ -89,6 +89,17 @@ function similarity(a: string, b: string): number {
 }
 
 /** Widen a locator that no longer resolves, then rank candidates by similarity to the original target. */
+/**
+ * Playwright chord for a press step: BrowserOps' `keys: ["Primary", "KeyA"]`
+ * (CDP names, modifiers first) or Forge's older `key` + `modifiers`.
+ */
+function chordOf(w: Record<string, unknown> | undefined): string {
+  const cdp = (k: string) => (k === "Primary" ? "ControlOrMeta" : k.replace(/^Key([A-Z])$/, "$1").replace(/^Digit(\d)$/, "$1"));
+  if (Array.isArray(w?.keys) && w.keys.length) return (w.keys as string[]).map(cdp).join("+");
+  const mods = Array.isArray(w?.modifiers) ? (w.modifiers as string[]).map(cdp) : [];
+  return [...mods, cdp(String(w?.key ?? "Enter"))].join("+");
+}
+
 function relocate(snapshot: SnapshotNode[], loc: Locator, opts: { widen_name?: boolean; widen_role?: boolean; consider_text?: boolean } = {}) {
   const original = parseSerialisedRegex(loc.name)?.source.replace(/^\^|\$$/g, "").replace(/\\(.)/g, "$1") ?? loc.name ?? "";
   const widened: Locator = { ...loc };
@@ -192,7 +203,7 @@ export async function executeProcedure(page: Page, proc: Procedure, opts: Execut
         continue;
       }
       if (step.do === "press" && !step.locator) {
-        const m = await measure(page, () => page.keyboard.press(String(step.with?.key ?? "Enter")));
+        const m = await measure(page, () => page.keyboard.press(chordOf(step.with)));
         const e = await pollExpect(page, step.expect, m, liveEndpoints);
         out.ok = e.ok;
         if (!e.ok) return finish("halted", { step: step.id, reason: e.reason! });
@@ -274,7 +285,7 @@ export async function executeProcedure(page: Page, proc: Procedure, opts: Execut
         else if (step.do === "type") await el.fill(String(step.with?.text ?? ""), { timeout: 3000 });
         else if (step.do === "press") {
           await el.focus();
-          await page.keyboard.press(String(step.with?.key ?? "Enter"));
+          await page.keyboard.press(chordOf(step.with));
         } else if (step.do === "scroll") await el.scrollIntoViewIfNeeded();
         else throw new Error(`unsupported step.do ${step.do}`);
       }, step.do === "type" ? 40 : 150);

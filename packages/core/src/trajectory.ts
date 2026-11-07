@@ -176,7 +176,8 @@ export function parseTextSnapshot(text: string): SnapshotNode[] {
 }
 
 /** Attributes live BrowserOps reports that Forge locators can bind to. */
-const LIVE_ATTRS = ["aria-label", "data-testid", "href", "name", "id", "placeholder"];
+// `type` carries a button's type (submit/button); an <input>'s inputType overrides it below.
+const LIVE_ATTRS = ["aria-label", "data-testid", "href", "name", "id", "placeholder", "type"];
 
 /**
  * Live BrowserOps `browser_read` (a11y_tree) returns

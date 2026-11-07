@@ -20,12 +20,14 @@ if (!file) {
 }
 const prefix = `mcp__${opt("server") ?? "browserops"}__`;
 const after = opt("after");
+// --session <name>: export only the calls between browser_set_session_name {name} and the next rename.
+const session = opt("session");
 
 type Block = { type: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean };
 
 const out: string[] = [];
 const ids = new Map<string, number>();
-let started = !after;
+let started = !after && opt("session") === undefined;
 let next = 1;
 
 for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -40,6 +42,18 @@ for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
   if (!Array.isArray(content)) continue;
   for (const b of content as Block[]) {
     if (b.type === "tool_use" && b.name?.startsWith(prefix) && b.id) {
+      if (session !== undefined && b.name === `${prefix}browser_set_session_name`) {
+        const named = (b.input as { name?: string } | undefined)?.name;
+        if (named === session) {
+          // Last segment with this name wins: restart the export.
+          out.length = 0;
+          ids.clear();
+          next = 1;
+          started = true;
+        } else if (started) {
+          started = false;
+        }
+      }
       if (!started) {
         if (b.id === after) started = true;
         continue;
