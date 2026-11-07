@@ -367,7 +367,7 @@ What the real sites exposed in Forge, all fixed and covered by tests:
 3. **`browser_navigate` replies arrive one navigation late.** On a fast local page, the reply comes back as an `orphan` only when the *next* navigation starts, so the first call times out at 45 s. `wait_for_load: false` and `observe_effects: false` don't help. Reloading the extension clears it for a while.
 4. **Relocation adds `has_text: "click"`**, which seems to come from the step's verb, so `widen_name` can't match the renamed button.
 5. **`procedures_resume`** expects `{kind: "resume_with", with: {locator}}`. The tool description reads like `{kind, locator}`, and that form is silently ignored.
-6. **Locator `near` is accepted but ignored.** `{role: button, name: /^Search$/i, near: {locator: <search box>, radius_px: 250}}` returns the same 2 matches as without `near`.
+6. **Locator `near` had no visible effect (unconfirmed).** `{role: button, name: /^Search$/i, near: {locator: <search box>, radius_px: 250}}` returned the same 2 matches as without `near`. Both buttons are within 250 px by edge distance but not by centre distance, so this needs a tighter repro.
 7. **Smaller detection gaps.** A default `scope: "viewport"` read returns an empty tree on TodoMVC, while `scope: "document"` returns 23 nodes. A click that navigates (Wikipedia's search button) reports `url.changed: false`. `data:` URLs show up in captured endpoints as `nullimage/svg+xml,…`. One navigate failed with `INTERNAL: Navigation rejected`.
 
 The full write-up, with repro steps and suggested fixes, is the separate bug report.
