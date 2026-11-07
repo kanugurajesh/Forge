@@ -67,7 +67,9 @@ describe("record → compile → replay (real browser)", () => {
 
   it("survives a redesign via relocation, and reports it", async () => {
     await setLayout("v2");
-    const r = await executeProcedure(session.page, proc, { inputs: { to: "me@relay.test", subject: "after redesign", body: "x" }, strict: true });
+    const r = await executeProcedure(session.page, proc, { inputs: { to: "me@relay.test", subject: "after redesign", body: "x" }, strict: false });
+    const strictRun = await executeProcedure(session.page, proc, { inputs: { to: "me@relay.test", subject: "strict", body: "x" }, strict: true });
+    expect(strictRun.status).toBe("halted"); // strict refuses relocation, as live BrowserOps does
     expect(r.status).toBe("completed");
     expect(r.resolutions.click_send.used_relocate).toBe(true);
     expect(r.resolutions.click_compose.used_relocate).toBe(false); // tier-1 testid survived the copy change

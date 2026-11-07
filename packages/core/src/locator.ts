@@ -30,6 +30,7 @@ export function classifyLocator(loc: Locator | undefined): Tier | null {
   for (const [key, value] of Object.entries(loc)) {
     if (value === undefined || value === null || key === "scope") continue;
     if (typeof value === "string" && value.length === 0) continue;
+    if (key === "name" && isExclusionName(value)) continue; // guard-only constraint, not copy
     const tier = FIELD_TIERS[key];
     if (tier === undefined) continue;
     if (worst === null || tier > worst) worst = tier;
@@ -65,6 +66,73 @@ export function textMatches(pattern: string, text: string): boolean {
   const re = parseSerialisedRegex(pattern);
   if (re) return re.test(text);
   return text.toLowerCase().includes(pattern.toLowerCase());
+}
+
+function matchString(value: string, pattern: string): boolean {
+  const re = parseSerialisedRegex(pattern);
+  if (re) return re.test(value);
+  return value.toLowerCase().includes(pattern.toLowerCase());
+}
+
+/**
+ * BrowserOps' static forbidden guard (bridge `procedures/forbidden.ts`,
+ * `locatorOverlaps`), ported verbatim. It runs on the step's *descriptor*, not
+ * on the element it resolves to, and only compares `role` and `name`: a step
+ * locator that omits either one cannot be proven safe, so it "overlaps".
+ * Consequence: `{data_testid: "compose-button"}` is refused next to a
+ * `{role: "button", name: "/^Archive$/i"}` forbidden entry.
+ */
+export function forbiddenOverlaps(denied: Locator, candidate: Locator): boolean {
+  if (denied.role) {
+    if (candidate.role !== undefined && !candidate.role.toLowerCase().includes(denied.role.toLowerCase())) return false;
+  }
+  if (denied.name) {
+    if (candidate.name) {
+      const a = denied.name;
+      const b = candidate.name;
+      if (!(a === b || matchString(a, b) || matchString(b, a))) return false;
+    }
+  }
+  return true;
+}
+
+const EXCLUSION_PREFIX = "/^(?!.*(?:";
+
+/** `name` pattern meaning "any name except these" — written only to satisfy the forbidden guard. */
+export function exclusionName(names: string[]): string {
+  return `${EXCLUSION_PREFIX}${names.map((n) => escapeRegex(n.trim())).join("|")})).*$/i`;
+}
+
+export function isExclusionName(v: unknown): boolean {
+  return typeof v === "string" && v.startsWith(EXCLUSION_PREFIX);
+}
+
+/**
+ * Make a step locator pass BrowserOps' static forbidden guard without losing
+ * stability. Adds the target's role; if the role still collides and the
+ * locator has a tier-1 anchor (testid/aria-label/attr/href), adds an exclusion
+ * name ("anything but the forbidden names") so copy changes still resolve. A
+ * role-only locator gets the target's anchored name instead. Returns a note
+ * when the locator changed.
+ */
+export function hardenForForbidden(
+  loc: Locator,
+  target: { role: string; name: string },
+  forbidden: Locator[],
+): string | undefined {
+  if (!forbidden.some((f) => forbiddenOverlaps(f, loc))) return undefined;
+  const before = JSON.stringify(loc);
+  if (!loc.role) loc.role = target.role;
+  if (forbidden.some((f) => forbiddenOverlaps(f, loc)) && !loc.name) {
+    const anchored = loc.data_testid || loc.aria_label || loc.attr || loc.href;
+    if (anchored) {
+      const names = forbidden.map((f) => f.name).filter((n): n is string => !!n).map((n) => parseSerialisedRegex(n)?.source.replace(/^\^|\$$/g, "").replace(/\\(.)/g, "$1") ?? n);
+      loc.name = exclusionName([...new Set(names)]);
+    } else if (target.name) {
+      loc.name = anchoredName(target.name);
+    }
+  }
+  return JSON.stringify(loc) === before ? undefined : `${before} → ${JSON.stringify(loc)}`;
 }
 
 /** Human-readable one-liner for UIs and reports. */

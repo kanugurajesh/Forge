@@ -13,7 +13,7 @@ Forge compiles one recorded agent run into a deterministic [BrowserOps](https://
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-runner-2EAD33?logo=playwright&logoColor=white)
 ![React](https://img.shields.io/badge/React-Hub%20UI-61DAFB?logo=react&logoColor=black)
-![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-35%20passing-brightgreen)
 
 <img src="docs/images/hub-registry.png" alt="Forge Hub registry: two trusted procedures with health, run counts and agent-vs-replay token cost" width="900">
 
@@ -33,6 +33,7 @@ Forge compiles one recorded agent run into a deterministic [BrowserOps](https://
 - [Architecture](#architecture)
 - [CLI](#cli)
 - [Why I built this](#why-i-built-this)
+- [Tested on the live runtime](#tested-on-the-live-runtime)
 - [Honest notes](#honest-notes)
 - [What I'd build next](#what-id-build-next)
 
@@ -46,7 +47,7 @@ npx playwright install chromium
 
 npm run demo                    # full lifecycle in a real headless browser (≈1 min)
 npm run build && npm run hub    # Hub UI at http://127.0.0.1:4317
-npm test                        # 31 tests: core, Hub API, real-browser runner
+npm test                        # 35 tests: core, live-runtime compat, Hub API, real-browser runner
 ```
 
 | Command | What it does |
@@ -159,7 +160,10 @@ steps:
   # … wait_compose (wait for the same testid) …
   - id: click_compose
     do: click
-    locator: { data_testid: compose-button }      # tier 1
+    locator:                                      # tier 1
+      data_testid: compose-button
+      role: button                                # role + exclusion name: lets the runtime's
+      name: /^(?!.*(?:Archive|Delete|Discard draft)).*$/i   # static forbidden guard prove it's not Archive/Delete
     expect: { new_dialog: /^New message$/i }
     fallback: { strategy: retry }
   # … fill_to, fill_subject, fill_message_body …
@@ -303,9 +307,39 @@ Forge is my attempt at both:
 1. **Background teaching.** When an agent finishes a task, the work of discovering the flow is already in its tool-call history. Forge turns that history into a procedure with no extra agent turns.
 2. **A shared registry.** Forge Hub stores procedures, but it only marks one *trusted* after it has seen verified runs, and it demotes procedures that drift, using the same thresholds as your runtime.
 
+## Tested on the live runtime
+
+I first built Forge against the public docs and the published npm packages. Then I installed BrowserOps 0.0.11 (WSL2, with the Chrome extension paired) and ran the whole loop on it. A real agent (Claude Code) did the task through the `browserops` MCP tools. I exported the tool calls from the session transcript, compiled them with Forge, and replayed them with BrowserOps' own `procedures_execute`.
+
+```bash
+npx tsx scripts/claude-session-to-mcp.ts ~/.claude/projects/<project>/<session>.jsonl > run.mcp.jsonl
+npm run forge -- compile run.mcp.jsonl --name relay.send_email
+```
+
+**Result:** 10 live calls → 7 steps. In strict mode on BrowserOps' runtime, the procedure completed **3 of 3 runs, every step `first_try`, with no LLM**, and the server received all three emails. On the v2 redesign, the `data_testid` Compose step still resolved first try. The copy-based Send step drifted, so the runtime escalated to `needs_assist`, and a `procedures_resume` patch completed the run. The recorded run and the compiled procedure are in [`fixtures/relay-send-email.live.mcp.jsonl`](fixtures/relay-send-email.live.mcp.jsonl) and [`fixtures/relay.send_email.live.yaml`](fixtures/relay.send_email.live.yaml).
+
+**The first live compile produced 0 steps.** Forge's own fixtures had encoded Forge's assumptions, so these gaps only showed up against the real runtime:
+
+| Found on the live runtime | Fix in Forge |
+|---|---|
+| `browser_read` returns `{content, refs[]}`, and `content` uses `[N] role "name"` | The adapter reads both |
+| `dialog.showModal()` and typing into an `<input>` cause zero DOM mutations, so Forge dropped real actions as no-ops | `effect.focus_moved_to` and `typed > 0` now count as page effects |
+| Agents open the app with `browser_new_tab {url}` | Treated as the entry navigation |
+| The forbidden guard checks the step's **descriptor** statically and compares only `role` and `name` | Ported verbatim (`forbiddenOverlaps`) and enforced by a new `forbidden-collision` lint error. Colliding steps get the target's `role`, plus an exclusion `name` (`/^(?!.*(?:Archive\|Delete)).*$/i`). That passes the guard without making the locator depend on copy, so `data_testid` still survives a redesign. |
+| A validation toast (*"Add a recipient"*) satisfies `dom_added_min`, so a failed send reported `completed: true` | A submit inside a surface opened earlier must show that surface closed (`text_invisible`) |
+| `strict` refuses **every** fallback, relocation included | Forge's runner now does the same. Trust needs strict runs, and drift shows up in non-strict runs. |
+
+**Issues in BrowserOps 0.0.11 itself** (reproduced, with log lines and source locations):
+
+1. **The forbidden guard rejects locators BrowserOps itself proposes.** `browser_propose_locator` returns `{data_testid: "compose-button"}`. `locatorOverlaps` (bridge `procedures/forbidden.ts`) treats any descriptor without `role` and `name` as overlapping, so a `{role: button, name: /^Archive$/i}` entry under `forbidden` blocks it.
+2. **`clear_mode: "auto"` clears the previously focused field.** It clears `document.activeElement` *before* it focuses the target. Repro: type into `to`, then type into `subject` with `clear_mode: "auto"`, and `to` ends up empty.
+3. **`browser_navigate` replies arrive one navigation late.** On a fast local page, the reply comes back as an `orphan` only when the *next* navigation starts, so the first call times out at 45 s. `wait_for_load: false` and `observe_effects: false` don't help. Reloading the extension clears it for a while.
+4. **Relocation adds `has_text: "click"`**, which seems to come from the step's verb, so `widen_name` can't match the renamed button.
+5. **`procedures_resume`** expects `{kind: "resume_with", with: {locator}}`. The tool description reads like `{kind, locator}`, and that form is silently ignored.
+
 ## Honest notes
 
-- **No live BrowserOps install was involved.** I worked from the public docs and the published npm packages. The schema, locator tiers, drift thresholds and tokenizer are ported from the MIT-licensed source (attribution in `packages/core/src/schema.ts`). Recorded trajectories come from a `browser_*`-compatible tool surface over Playwright (`RecordingTools`) driven by a scripted stand-in for an LLM agent. The DOM, effects and network are real; the "agent" is not.
+- Locator tiers, drift thresholds, the schema and the tokenizer are ported from the MIT-licensed BrowserOps packages (attribution in `packages/core/src/schema.ts`). The Playwright-based demo (`npm run demo`) still uses a scripted stand-in agent so it can run offline. The live run above used a real one.
 - **Token counts are estimates** (about 4 characters per token, plus a per-turn floor) unless a transcript carries `usage`.
 - The runner implements the fallback ladder up to relocation. The `llm` rung deliberately halts with `needs_llm` rather than faking a patch.
 - `near`, `in_frame` and `procedure_call` (composites) are validated by the schema but not executed by the Forge runner yet.

@@ -129,7 +129,12 @@ export function hadPageEffect(r: ToolResult | undefined): boolean {
     if (ef.url_changed) return true;
     if ((ef.network?.requests ?? 0) > 0) return true;
     if ((ef.new_dialogs?.length ?? 0) > 0) return true;
+    // Live BrowserOps: <dialog>.showModal() mutates nothing, but focus lands inside it.
+    if (ef.focus_moved_to) return true;
   }
+  // Setting an <input>'s value is not a DOM mutation, so a successful type into an
+  // already-focused field reports page_effect = 0. `typed` is the dispatch receipt.
+  if (typeof r.typed === "number" && r.typed > 0) return true;
   // No envelope at all: we can't prove a no-op, so trust the dispatch.
   return !pe && !ef;
 }
@@ -144,10 +149,14 @@ export function estimateTokens(call: ToolCall): number {
 
 // ---------------------------------------------------------------- adapters
 
-/** Parse a text a11y tree (`- button "Send" [ref=12]` or `[Send r12]`) into nodes. */
+/**
+ * Parse a text a11y tree into nodes. Accepts `- button "Send" [ref=12]`,
+ * `[Send r12]`, and live BrowserOps' `[12] button "Send"` (name optional).
+ */
 export function parseTextSnapshot(text: string): SnapshotNode[] {
   const nodes: SnapshotNode[] = [];
   const lineRe = /^\s*[-│├└ ]*\s*([a-z]+)\s+"([^"]*)"[^\n]*?\[ref=(?:e)?(\d+)\]/i;
+  const leadRe = /^\s*\[(\d+)\]\s+([a-z]+)(?:\s+"([^"]*)")?/i;
   const boxRe = /\[([^\]]*?)\s+r(\d+)\]/;
   for (const line of text.split(/\r?\n/)) {
     const m = lineRe.exec(line);
@@ -155,10 +164,41 @@ export function parseTextSnapshot(text: string): SnapshotNode[] {
       nodes.push({ role: m[1].toLowerCase(), name: m[2], ref: Number(m[3]) });
       continue;
     }
+    const l = leadRe.exec(line);
+    if (l) {
+      nodes.push({ role: l[2].toLowerCase(), name: l[3] ?? "", ref: Number(l[1]) });
+      continue;
+    }
     const b = boxRe.exec(line);
     if (b) nodes.push({ role: "generic", name: b[1].replace(/^<|>$/g, ""), ref: Number(b[2]) });
   }
   return nodes;
+}
+
+/** Attributes live BrowserOps reports that Forge locators can bind to. */
+const LIVE_ATTRS = ["aria-label", "data-testid", "href", "name", "id", "placeholder"];
+
+/**
+ * Live BrowserOps `browser_read` (a11y_tree) returns
+ *   { content: "[4] button \"Compose\"\n…", refs: [{ ref, role, name, selector, attrs: { "data-testid", domType, inputType, … } }] }
+ * Prefer `refs` (it carries attributes); fall back to parsing `content`.
+ */
+function fromLiveRead(parsed: Record<string, unknown>): SnapshotNode[] {
+  if (Array.isArray(parsed.refs)) {
+    const nodes: SnapshotNode[] = [];
+    for (const raw of parsed.refs as Record<string, unknown>[]) {
+      if (typeof raw?.ref !== "number" || typeof raw.role !== "string") continue;
+      const src = (raw.attrs ?? {}) as Record<string, unknown>;
+      const attrs: Record<string, string> = {};
+      for (const k of LIVE_ATTRS) if (typeof src[k] === "string" && src[k]) attrs[k] = src[k] as string;
+      if (typeof src.inputType === "string") attrs.type = src.inputType;
+      const idSel = typeof raw.selector === "string" ? /^#([A-Za-z][\w-]*)$/.exec(raw.selector) : null;
+      if (idSel && !attrs.id) attrs.id = idSel[1];
+      nodes.push({ ref: raw.ref, role: raw.role, name: typeof raw.name === "string" ? raw.name : "", attrs });
+    }
+    return nodes;
+  }
+  return typeof parsed.content === "string" ? parseTextSnapshot(parsed.content) : [];
 }
 
 function coerceResult(raw: unknown): ToolResult {
@@ -173,6 +213,10 @@ function coerceResult(raw: unknown): ToolResult {
       let parsed: ToolResult = {};
       try {
         parsed = JSON.parse(text);
+        if (!parsed.snapshot) {
+          const snap = fromLiveRead(parsed);
+          if (snap.length) parsed.snapshot = snap;
+        }
       } catch {
         const snap = parseTextSnapshot(text);
         if (snap.length) parsed.snapshot = snap;

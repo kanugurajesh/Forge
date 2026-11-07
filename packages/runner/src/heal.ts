@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import { classifyLocator, describeLocator, proposeLocator, type Locator, type Procedure } from "@forge/core";
+import { classifyLocator, describeLocator, hardenForForbidden, proposeLocator, type Locator, type Procedure } from "@forge/core";
 import { executeProcedure, type RunResult } from "./execute.ts";
 
 export interface HealPatch {
@@ -34,6 +34,7 @@ export async function healProcedure(
       const step = next.steps.find((s) => s.id === stepId);
       if (!step?.locator) return;
       const p = proposeLocator(target, snapshot);
+      hardenForForbidden(p.locator, target, proc.forbidden?.locators ?? []);
       if (JSON.stringify(p.locator) === JSON.stringify(step.locator)) return;
       patches.push({
         step: stepId,

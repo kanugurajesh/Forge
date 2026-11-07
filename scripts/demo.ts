@@ -122,8 +122,8 @@ async function main() {
     }
 
     // ------------------------------------------------------------------ 4. VERIFY
-    const runAndReport = async (proc: Procedure, inputs: Record<string, string>, env: string, check?: () => Promise<boolean>) => {
-      const res: RunResult = await executeProcedure(page, proc, { inputs, strict: true });
+    const runAndReport = async (proc: Procedure, inputs: Record<string, string>, env: string, check?: () => Promise<boolean>, strict = true) => {
+      const res: RunResult = await executeProcedure(page, proc, { inputs, strict });
       let predicate = true;
       if (check && res.completed) predicate = await check();
       const report = { ...res, completed: res.completed && predicate, environment: env, runner: "forge-runner/playwright" };
@@ -161,7 +161,8 @@ async function main() {
     await setLayout("v2");
     for (let i = 1; i <= 3; i++) {
       const subject = `Post-redesign #${i} ${Date.now() % 10000}`;
-      await runAndReport(sendProc, { to: "me@relay.test", subject, body: "drift run" }, "app@v2-redesign", sentHas(subject));
+      // Production runs aren't strict (strict refuses relocation, as in BrowserOps); drift shows up as relocations.
+      await runAndReport(sendProc, { to: "me@relay.test", subject, body: "drift run" }, "app@v2-redesign", sentHas(subject), false);
     }
 
     // ------------------------------------------------------------------ 6. HEAL

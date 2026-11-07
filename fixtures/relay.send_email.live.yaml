@@ -1,0 +1,132 @@
+schema_version: 1
+name: relay.send_email
+description: Compiled from 10 recorded tool calls
+kind: leaf
+domain: demo
+tags:
+  - demo
+  - forge-compiled
+side_effects:
+  - send_message
+inputs:
+  to:
+    type: string
+    required: true
+    description: Text for "to"
+    destructive: true
+  subject:
+    type: string
+    required: true
+    description: Text for "subject"
+    destructive: true
+  body:
+    type: string
+    required: true
+    description: Text for "Message body"
+    destructive: true
+forbidden:
+  locators:
+    - role: button
+      name: /^Archive$/i
+    - role: button
+      name: /^Delete$/i
+    - role: button
+      name: /^Discard draft$/i
+steps:
+  - id: open_app
+    goal: Open http://127.0.0.1:4317/demo/
+    do: navigate
+    with:
+      url: http://127.0.0.1:4317/demo/
+      wait_for_load: false
+    expect:
+      url_matches: /demo/
+      timeout_ms: 10000
+  - id: wait_compose
+    goal: Wait until "Compose" is ready
+    do: wait
+    locator:
+      data_testid: compose-button
+      role: button
+      name: /^(?!.*(?:Archive|Delete|Discard draft)).*$/i
+    with:
+      timeout_ms: 10000
+  - id: click_compose
+    goal: Click "Compose"
+    do: click
+    locator:
+      data_testid: compose-button
+      role: button
+      name: /^(?!.*(?:Archive|Delete|Discard draft)).*$/i
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+    expect:
+      text_visible: New message
+      timeout_ms: 5000
+  - id: fill_to
+    goal: Type to into "to"
+    do: type
+    locator:
+      attr:
+        name: name
+        value: to
+      role: textbox
+    with:
+      text: "{{to}}"
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: fill_subject
+    goal: Type subject into "subject"
+    do: type
+    locator:
+      attr:
+        name: name
+        value: subject
+      role: textbox
+    with:
+      text: "{{subject}}"
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: fill_message_body
+    goal: Type body into "Message body"
+    do: type
+    locator:
+      aria_label: Message body
+      role: textbox
+    with:
+      text: "{{body}}"
+    fallback:
+      strategy: retry
+      retry:
+        attempts: 2
+        backoff_ms: 250
+  - id: click_send
+    goal: Click "Send"
+    do: click
+    locator:
+      role: button
+      name: /^Send$/i
+    expect:
+      text_invisible: /^Send$/m
+      timeout_ms: 5000
+    fallback:
+      strategy: relocate_then_llm
+      relocate:
+        widen_name: true
+        consider_text: true
+      budget:
+        tool_calls: 4
+        tokens: 4000
+meta:
+  version: 1
+  created: 2026-11-07T10:17:05.554Z
+  status: draft

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   compileTrajectory,
   emptyHealth,
@@ -13,6 +14,9 @@ import {
   shouldDemote,
   tokenize,
   validateProcedure,
+  classifyLocator,
+  forbiddenOverlaps,
+  isExclusionName,
   type Procedure,
 } from "../src/index.ts";
 import { composeSnapshot, gmailTrajectory } from "./fixtures.ts";
@@ -45,8 +49,13 @@ describe("compiler", () => {
   });
 
   it("prefers tier-1 locators and anchors names to avoid 'Schedule send'", () => {
-    expect(p.steps.find((s) => s.id === "click_compose")?.locator).toEqual({ data_testid: "compose" });
-    expect(p.steps.find((s) => s.id === "fill_to")?.locator).toEqual({ attr: { name: "name", value: "to" } });
+    const compose = p.steps.find((s) => s.id === "click_compose")!.locator!;
+    expect(compose.data_testid).toBe("compose");
+    expect(compose.role).toBe("button");
+    expect(isExclusionName(compose.name)).toBe(true); // guard-only constraint, not copy
+    expect(classifyLocator(compose)).toBe(1);
+    for (const f of p.forbidden!.locators!) expect(forbiddenOverlaps(f, compose)).toBe(false);
+    expect(p.steps.find((s) => s.id === "fill_to")?.locator).toEqual({ attr: { name: "name", value: "to" }, role: "textbox" });
     const send = p.steps.find((s) => s.id === "click_send")!;
     expect(send.locator).toEqual({ role: "button", name: "/^Send$/i" });
     expect(resolveLocator(composeSnapshot, send.locator!)).toHaveLength(1);
@@ -164,5 +173,43 @@ describe("search", () => {
     const p = { name: "gmail.send_email", description: "Send an email", domain: "gmail" };
     expect(scoreProcedure("gmail send email", p)).toBeGreaterThan(0.9);
     expect(scoreProcedure("linear triage", p)).toBe(0);
+  });
+});
+
+describe("live BrowserOps compatibility", () => {
+  // Exported from a real Claude Code session driving BrowserOps 0.0.11 against the Relay demo.
+  const live = compileTrajectory(
+    parseTrajectory(readFileSync(new URL("../../../fixtures/relay-send-email.live.mcp.jsonl", import.meta.url), "utf8")),
+    { name: "relay.send_email", now: "2026-11-07T00:00:00Z" },
+  );
+
+  it("reads browser_read {content, refs[]} and keeps zero-mutation actions", () => {
+    expect(live.procedure.steps.map((s) => s.id)).toEqual([
+      "open_app", "wait_compose", "click_compose", "fill_to", "fill_subject", "fill_message_body", "click_send",
+    ]);
+    expect(live.procedure.steps.find((s) => s.id === "fill_to")?.locator).toEqual({ attr: { name: "name", value: "to" }, role: "textbox" });
+    expect(live.samples).toEqual({ to: "priya@relay.dev", subject: "Launch checklist", body: "Looks good, ship it Friday." });
+  });
+
+  it("emits nothing the runtime's static forbidden guard would refuse", () => {
+    expect(live.lint.filter((f) => f.severity === "error")).toEqual([]);
+    for (const s of live.procedure.steps)
+      for (const f of live.procedure.forbidden!.locators!) if (s.locator) expect(forbiddenOverlaps(f, s.locator)).toBe(false);
+  });
+
+  it("makes a dialog submit prove the dialog closed (a validation toast also adds DOM)", () => {
+    expect(live.procedure.steps.find((s) => s.id === "click_send")?.expect).toEqual({ text_invisible: "/^Send$/m", timeout_ms: 5000 });
+    expect(live.procedure.steps[0].with).toMatchObject({ wait_for_load: false });
+  });
+});
+
+describe("forbidden guard port", () => {
+  const archive = { role: "button", name: "/^Archive$/i" };
+  it("matches BrowserOps: a descriptor without role+name cannot be proven safe", () => {
+    expect(forbiddenOverlaps(archive, { data_testid: "compose-button" })).toBe(true);
+    expect(forbiddenOverlaps(archive, { data_testid: "compose-button", role: "button" })).toBe(true);
+    expect(forbiddenOverlaps(archive, { aria_label: "Message body", role: "textbox" })).toBe(false);
+    expect(forbiddenOverlaps(archive, { role: "button", name: "/^Send$/i" })).toBe(false);
+    expect(forbiddenOverlaps(archive, { role: "button", name: "/^Archive$/i" })).toBe(true);
   });
 });

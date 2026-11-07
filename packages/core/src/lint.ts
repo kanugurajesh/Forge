@@ -1,5 +1,5 @@
 import type { Procedure, Step } from "./types.ts";
-import { classifyLocator, parseSerialisedRegex } from "./locator.ts";
+import { classifyLocator, forbiddenOverlaps, parseSerialisedRegex } from "./locator.ts";
 import { validateProcedure } from "./schema.ts";
 
 /**
@@ -23,6 +23,7 @@ export const RULES: Record<string, { severity: Severity; title: string }> = {
   "no-baked-ref": { severity: "error", title: "Refs don't survive replay — use a locator" },
   "llm-needs-expect": { severity: "error", title: "llm fallback without expect fires on every step" },
   "undeclared-input": { severity: "error", title: "Template references an input that isn't declared" },
+  "forbidden-collision": { severity: "error", title: "BrowserOps' static forbidden guard will refuse this step" },
   "unused-input": { severity: "warning", title: "Declared input is never used" },
   "fragile-locator": { severity: "warning", title: "Tier-3 (nth) locator without a recovery path" },
   "unanchored-name": { severity: "warning", title: "Unanchored name matches more than you think" },
@@ -83,11 +84,21 @@ export function lintProcedure(p: Procedure): LintFinding[] {
     if (s.do === "observe" && steps[i + 1]?.locator) add("manual-prime", "the executor auto-primes before every locator step", s.id, "Delete this step");
     if (s.do === "js") add("raw-js", "js steps bypass locator safety", s.id);
     if (s.do === "click" && !s.expect) add("click-without-expect", "add an expect so drift is detected", s.id);
+    if (s.locator) {
+      const hit = (p.forbidden?.locators ?? []).find((d) => forbiddenOverlaps(d, s.locator!));
+      if (hit)
+        add(
+          "forbidden-collision",
+          `locator can't be proven distinct from forbidden ${JSON.stringify(hit)} (the runtime compares only role + name)`,
+          s.id,
+          "Add the target's role, and an anchored name if the role matches",
+        );
+    }
   });
 
   const se = p.side_effects ?? [];
   if (se.length > 0 && !(p.forbidden?.locators?.length || p.forbidden?.actions?.length))
-    add("missing-forbidden", `side_effects [${se.join(", ")}] declared with no forbidden{} guard`, undefined, 'Add forbidden.locators: [{ name: "/^delete/i" }]');
+    add("missing-forbidden", `side_effects [${se.join(", ")}] declared with no forbidden{} guard`, undefined, 'Add forbidden.locators: [{ role: "button", name: "/^delete/i" }]');
   if (se.some((x) => x !== "delete")) {
     for (const [k, spec] of Object.entries(p.inputs ?? {})) {
       if (!spec.destructive && used.has(k)) add("destructive-input", `inputs.${k} reaches a ${se.join("/")} flow`, undefined, `Set inputs.${k}.destructive: true`);

@@ -224,7 +224,8 @@ export async function executeProcedure(page: Page, proc: Procedure, opts: Execut
       let usedRelocate = false;
       let matchCount = matches.length;
       if (!target) {
-        if (fb.strategy === "relocate" || fb.strategy === "relocate_then_llm") {
+        // Live BrowserOps: strict refuses *every* fallback, relocation included.
+        if (!strict && (fb.strategy === "relocate" || fb.strategy === "relocate_then_llm")) {
           const r = relocate(snapshot, step.locator, fb.relocate);
           if (r && !r.ambiguous) {
             target = r.node;

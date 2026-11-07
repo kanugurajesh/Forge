@@ -12,7 +12,7 @@ import {
   type Trajectory,
 } from "./trajectory.ts";
 import { proposeLocator } from "./resolve.ts";
-import { anchoredName, escapeRegex, type Tier } from "./locator.ts";
+import { anchoredName, classifyLocator, escapeRegex, hardenForForbidden, type Tier } from "./locator.ts";
 import { validateProcedure, type SchemaIssue } from "./schema.ts";
 import { lintProcedure, type LintFinding } from "./lint.ts";
 
@@ -212,18 +212,20 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
       for (const n of r.snapshot) seen.set(`${n.role}|${n.name}|${n.dialog ?? ""}`, n);
     }
 
-    if (OBSERVATION_TOOLS.has(call.tool) || call.tool.startsWith("lore_") || call.tool.startsWith("procedures_")) {
+    // Live agents usually open the app with browser_new_tab {url}, not browser_navigate.
+    const opensUrl = call.tool === "browser_new_tab" && typeof call.args.url === "string" && call.args.url !== "";
+    if (!opensUrl && (OBSERVATION_TOOLS.has(call.tool) || call.tool.startsWith("lore_") || call.tool.startsWith("procedures_"))) {
       drop(call, "observation", "read-only; the runtime auto-primes before locator steps");
       continue;
     }
     const failed = r?.ok === false || typeof r?.error === "string";
 
-    if (NAV_TOOLS.has(call.tool)) {
+    if (NAV_TOOLS.has(call.tool) || opensUrl) {
       if (failed) {
         drop(call, "failed", `navigation failed: ${r?.error ?? "error"}`);
         continue;
       }
-      if (call.tool !== "browser_navigate") {
+      if (call.tool !== "browser_navigate" && !opensUrl) {
         drop(call, "unreplayable", `${call.tool} depends on history; the next navigate pins the URL explicitly`);
         continue;
       }
@@ -297,7 +299,8 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
       for (const w of p.warnings) warnings.push(`${node.role} "${node.name}": ${w}`);
     }
 
-    const label = node?.name || node?.attrs?.["aria-label"] || String(call.args.key ?? verb);
+    const label =
+      node?.name || node?.attrs?.["aria-label"] || node?.attrs?.placeholder || node?.attrs?.name || String(call.args.key ?? verb);
     const step: Step = { id: "", goal: "", do: verb };
     if (locator) step.locator = locator;
     let inputName: string | undefined;
@@ -318,7 +321,9 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
       }
       inputs[inputName] = { type: "string", required: true, description: `Text for "${label}"`, _node: node };
       samples[inputName] = value;
-      step.with = { text: `{{${inputName}}}`, clear_mode: "auto" };
+      // Replay what the agent did. Don't invent clear_mode: live BrowserOps 0.0.11 clears
+      // document.activeElement *before* focusing the target, so it wipes the previous field.
+      step.with = { text: `{{${inputName}}}`, ...(call.args.clear_mode ? { clear_mode: call.args.clear_mode } : {}) };
       step.goal = `Type ${inputName} into "${label}"`;
       step.id = uniqueId(`fill_${slug(label, 30)}`, ids);
     } else if (verb === "press") {
@@ -345,11 +350,29 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
     keep(call, { step, seq: call.seq, node, tier, endpoints: endpointsOf(r), inputName }, step.goal ?? "");
   }
 
+  // ---- clicks with no measurable effect signal: expect the heading/dialog the next read revealed
+  for (const d of drafts) {
+    if (d.step.do !== "click" || d.step.expect) continue;
+    const prior = new Set<string>();
+    for (const c of traj.calls) if (c.seq < d.seq) for (const n of c.result?.snapshot ?? []) prior.add(`${n.role}|${n.name}`);
+    const next = traj.calls.find((c) => c.seq > d.seq && c.result?.snapshot?.length);
+    const revealed = next?.result?.snapshot?.find(
+      (n) => ["dialog", "alertdialog", "heading", "status", "alert"].includes(n.role) && n.name && !prior.has(`${n.role}|${n.name}`),
+    );
+    if (revealed) {
+      d.step.expect = { text_visible: revealed.name, timeout_ms: 5000 };
+      if (d.tier && d.tier > 1) d.step.fallback = fallbackFor(d.tier, true);
+    }
+  }
+
   // ---- entry-step pattern: navigate → wait for entry control → act
   const navIdx = drafts.findIndex((d) => d.step.do === "navigate");
   if (navIdx >= 0) {
     const entry = drafts[navIdx + 1];
     if (entry?.step.locator && entry.step.do === "click") {
+      // The wait step below gates readiness, so the navigate needn't block on the load event.
+      // Live BrowserOps 0.0.11 misses load completion on fast pages and hangs 45s otherwise.
+      drafts[navIdx].step.with = { ...drafts[navIdx].step.with, wait_for_load: false };
       drafts.splice(navIdx + 1, 0, {
         step: {
           id: uniqueId(`wait_${slug(entry.node?.name ?? "entry", 30)}`, ids),
@@ -379,6 +402,15 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
     if (DESTRUCTIVE_CONTROL.test(nm)) sideEffects.add("delete");
   }
   if (submit) {
+    // A submit inside a surface an earlier step opened (dialog/sheet) must prove the surface
+    // closed. `dom_added_min` alone is satisfied by a validation toast ("Add a recipient").
+    const firstSnap = traj.calls.find((c) => c.result?.snapshot?.length)?.result?.snapshot ?? [];
+    const opened = submit.node && !firstSnap.some((n) => n.role === submit!.node!.role && n.name === submit!.node!.name);
+    const weak = !submit.step.expect || Object.keys(submit.step.expect).every((k) => k === "dom_added_min" || k === "timeout_ms");
+    if (opened && weak && submit.node!.name) {
+      submit.step.expect = { text_invisible: `/^${escapeRegex(submit.node!.name.trim())}$/m`, timeout_ms: 5000 };
+      if (submit.step.fallback && submit.tier) submit.step.fallback = fallbackFor(submit.tier, true);
+    }
     for (const [name, spec] of Object.entries(inputs)) {
       if ((spec._node?.dialog ?? "") === (submit.node?.dialog ?? "")) spec.destructive = true;
     }
@@ -394,6 +426,16 @@ export function compileTrajectory(traj: Trajectory, opts: CompileOptions = {}): 
     if (forbiddenNames.has(key) || forbidden.length >= 10) continue;
     forbiddenNames.add(key);
     forbidden.push({ role: n.role, name: anchoredName(n.name) });
+  }
+
+  // ---- satisfy BrowserOps' static forbidden guard: it compares only role + name, so a
+  //      tier-1 descriptor ({data_testid}) next to a {role: button, name} entry is refused.
+  for (const d of drafts) {
+    // mutates in place: the entry wait step shares this locator object
+    if (d.step.locator && d.node && hardenForForbidden(d.step.locator, d.node, forbidden)) {
+      d.tier = (classifyLocator(d.step.locator) ?? d.tier) as Tier;
+      if (d.step.fallback) d.step.fallback = fallbackFor(d.tier, !!d.step.expect);
+    }
   }
 
   // ---- verify: endpoint of the final submit + any status/alert text that appeared after it
