@@ -1,0 +1,5 @@
+node_modules
+dist
+.forge-data
+.playwright-mcp
+*.log

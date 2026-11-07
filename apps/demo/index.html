@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Relay Mail</title>
+<style>
+  :root { --bg:#fafaf9; --panel:#fff; --line:#e7e5e4; --ink:#1c1917; --mute:#78716c; --accent:#2563eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; align-items:center; gap:16px; padding:10px 18px; border-bottom:1px solid var(--line); background:var(--panel); }
+  .logo { font-weight:700; letter-spacing:-.3px; }
+  header input { flex:1; max-width:480px; padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); }
+  .layout { display:grid; grid-template-columns:200px 1fr; min-height:calc(100vh - 53px); }
+  nav { padding:14px; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:4px; }
+  nav a { color:var(--ink); text-decoration:none; padding:6px 10px; border-radius:6px; }
+  nav a[aria-current] { background:#e0e7ff; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); border-radius:8px; padding:7px 12px; }
+  .primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .compose { margin-bottom:10px; padding:10px 14px; }
+  main { padding:14px 18px; }
+  .toolbar { display:flex; gap:8px; margin-bottom:10px; }
+  .row { display:grid; grid-template-columns:160px 1fr 70px; gap:12px; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:6px; }
+  .row .from { font-weight:600; }
+  .row .when { color:var(--mute); text-align:right; }
+  dialog { border:1px solid var(--line); border-radius:12px; padding:0; width:520px; box-shadow:0 20px 50px rgba(0,0,0,.15); }
+  dialog form { display:flex; flex-direction:column; }
+  dialog h2 { margin:0; font-size:14px; padding:10px 14px; background:#f5f5f4; border-bottom:1px solid var(--line); }
+  dialog label { display:flex; gap:8px; align-items:center; border-bottom:1px solid var(--line); padding:6px 14px; color:var(--mute); }
+  dialog label input { flex:1; border:0; outline:none; font:inherit; padding:4px 0; color:var(--ink); }
+  dialog textarea { border:0; outline:none; padding:12px 14px; min-height:160px; font:inherit; resize:vertical; }
+  .actions { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--line); }
+  .actions .spacer { flex:1; }
+  [role=status] { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:var(--ink); color:#fff; padding:10px 16px; border-radius:8px; }
+  .empty { color:var(--mute); padding:20px 0; }
+  .badge { font-size:11px; color:var(--mute); border:1px solid var(--line); border-radius:99px; padding:1px 8px; }
+  /* v2 redesign: different visual system, same app */
+  body.v2 { --bg:#0f172a0a; --accent:#7c3aed; }
+  body.v2 .layout { grid-template-columns:230px 1fr; }
+  body.v2 .compose { border-radius:999px; background:var(--accent); border-color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">✉ Relay</span>
+  <input id="search" type="search" aria-label="Search mail" placeholder="Search mail" autocomplete="off" />
+  <span class="badge" id="layout-badge"></span>
+</header>
+<div class="layout">
+  <nav aria-label="Folders">
+    <button class="primary compose" data-testid="compose-button" id="compose-btn">Compose</button>
+    <a href="#inbox" data-folder="inbox">Inbox</a>
+    <a href="#sent" data-folder="sent">Sent</a>
+    <a href="#drafts" data-folder="drafts">Drafts</a>
+  </nav>
+  <main>
+    <div class="toolbar">
+      <button type="button" id="refresh" onmousedown="event.preventDefault()">Refresh</button>
+      <button type="button" id="archive">Archive</button>
+      <button type="button" id="delete">Delete</button>
+    </div>
+    <section id="list" aria-label="Messages"></section>
+  </main>
+</div>
+
+<dialog id="composer" aria-label="New message">
+  <form method="dialog" id="compose-form">
+    <h2>New message</h2>
+    <label>To <input name="to" autocomplete="off" /></label>
+    <label>Subject <input name="subject" autocomplete="off" /></label>
+    <textarea aria-label="Message body" name="body"></textarea>
+    <div class="actions">
+      <button type="button" class="primary" data-action="send">Send</button>
+      <button type="button" id="schedule-btn">Schedule send</button>
+      <span class="spacer"></span>
+      <button type="button" id="discard-btn">Discard draft</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  // Layout is chosen by cookie so a "redesign" can ship at the same URL — exactly how real apps drift under a saved procedure.
+  const layout = /(?:^|; )relay_layout=v2/.test(document.cookie) ? "v2" : "v1";
+  document.body.classList.toggle("v2", layout === "v2");
+  document.getElementById("layout-badge").textContent = "layout " + layout;
+  if (layout === "v2") {
+    // Redesign copy changes. Contract attributes (data-testid, name, aria-label) are untouched.
+    document.getElementById("compose-btn").textContent = "New message";
+    document.querySelector("[data-action=send]").textContent = "Send message";
+  }
+
+  const API = "/demo/api";
+  const list = document.getElementById("list");
+  let folder = (location.hash || "#inbox").slice(1);
+
+  async function render(q = "") {
+    document.querySelectorAll("nav a").forEach((a) => a.toggleAttribute("aria-current", a.dataset.folder === folder));
+    const url = q ? `${API}/search?q=${encodeURIComponent(q)}` : `${API}/${folder === "sent" ? "sent" : "inbox"}`;
+    const rows = await (await fetch(url)).json();
+    list.innerHTML = rows.length
+      ? rows.map((m) => `<article class="row" aria-label="${esc(m.subject)}"><span class="from">${esc(folder === "sent" ? m.to : m.from)}</span><span>${esc(m.subject)}</span><span class="when">${esc(m.when)}</span></article>`).join("")
+      : `<p class="empty">${q ? `No results for “${esc(q)}”` : "Nothing here."}</p>`;
+  }
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+  window.addEventListener("hashchange", () => { folder = location.hash.slice(1) || "inbox"; render(); });
+  document.getElementById("search").addEventListener("keydown", (e) => { if (e.key === "Enter") render(e.target.value.trim()); });
+
+  const dlg = document.getElementById("composer");
+  const form = document.getElementById("compose-form");
+  document.getElementById("compose-btn").addEventListener("click", () => { form.reset(); dlg.showModal(); });
+  document.getElementById("discard-btn").addEventListener("click", () => dlg.close());
+  document.getElementById("schedule-btn").addEventListener("click", () => toast("Scheduling isn't available in this demo"));
+  document.querySelector("[data-action=send]").addEventListener("click", async () => {
+    const data = Object.fromEntries(new FormData(form));
+    if (!data.to) return toast("Add at least one recipient");
+    await fetch(`${API}/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) });
+    dlg.close();
+    toast(`Message sent: ${data.subject || "(no subject)"}`);
+    if (folder === "sent") render();
+  });
+  // Refresh is a no-op while the list is current — a classic "click dispatched, nothing happened".
+  let lastRender = Date.now();
+  document.getElementById("refresh").addEventListener("click", () => { if (Date.now() - lastRender > 60000) { lastRender = Date.now(); render(); } });
+  for (const id of ["archive", "delete"]) document.getElementById(id).addEventListener("click", () => toast(`${id} is disabled in the demo`));
+
+  let t;
+  function toast(msg) {
+    document.querySelector("[role=status]")?.remove();
+    const el = document.createElement("div");
+    el.setAttribute("role", "status");
+    el.textContent = msg;
+    document.body.append(el);
+    clearTimeout(t);
+    t = setTimeout(() => el.remove(), 4000);
+  }
+  render();
+</script>
+</body>
+</html>
