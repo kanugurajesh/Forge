@@ -61,6 +61,11 @@ npm test                        # 35 tests: core, live-runtime compat, Hub API, 
 
 ## Demo
 
+<p align="center">
+  <img src="docs/media/forge-walkthrough.gif" alt="Walkthrough: an agent sends an email, Forge compiles the run (and a live BrowserOps run) into a procedure, the Hub trusts it, the site ships a redesign, relocations are caught and the procedure is healed" width="880">
+  <br><sub>43-second walkthrough · <a href="docs/media/forge-walkthrough.mp4">full-quality MP4</a> · regenerate with <code>npx tsx scripts/capture-media.ts full</code></sub>
+</p>
+
 `npm run demo` drives a real headless Chromium against **Relay Mail**, a small bundled app. A scripted "agent" sends an email the messy way real agents do: a dead Refresh click, a stale ref, a typo it retypes, screenshots and re-reads. Forge then runs the whole lifecycle.
 
 <p align="center">
@@ -316,7 +321,11 @@ npx tsx scripts/claude-session-to-mcp.ts ~/.claude/projects/<project>/<session>.
 npm run forge -- compile run.mcp.jsonl --name relay.send_email
 ```
 
-**Result:** 10 live calls → 7 steps. In strict mode on BrowserOps' runtime, the procedure completed **3 of 3 runs, every step `first_try`, with no LLM**, and the server received all three emails. On the v2 redesign, the `data_testid` Compose step still resolved first try. The copy-based Send step drifted, so the runtime escalated to `needs_assist`, and a `procedures_resume` patch completed the run. The recorded run and the compiled procedure are in [`fixtures/relay-send-email.live.mcp.jsonl`](fixtures/relay-send-email.live.mcp.jsonl) and [`fixtures/relay.send_email.live.yaml`](fixtures/relay.send_email.live.yaml).
+**Result:** 10 live calls → 7 steps. In strict mode on BrowserOps' runtime, the procedure completed **3 of 3 runs, every step `first_try`, with no LLM**, and the server received all three emails. On the v2 redesign, the `data_testid` Compose step still resolved first try. The copy-based Send step drifted, so the runtime escalated to `needs_assist`, and a `procedures_resume` patch completed the run. The recorded run and the compiled procedure are in [`fixtures/relay-send-email.live.mcp.jsonl`](fixtures/relay-send-email.live.mcp.jsonl) and [`fixtures/relay.send_email.live.yaml`](fixtures/relay.send_email.live.yaml). You can load the live run in the Hub with **Compile a run → Load: Live BrowserOps run (MCP)**.
+
+<p align="center">
+  <img src="docs/images/hub-compile-live.png" alt="Hub compile page with the live BrowserOps MCP transcript: 10 recorded calls, 4 observations dropped, 7 steps, 0 tokens per replay" width="900">
+</p>
 
 **The first live compile produced 0 steps.** Forge's own fixtures had encoded Forge's assumptions, so these gaps only showed up against the real runtime:
 

@@ -6,6 +6,7 @@ import { Yaml } from "../components/ui.tsx";
 const SAMPLES = [
   { file: "relay-send-email.trajectory.jsonl", label: "Noisy “send email” run", name: "relay.send_email" },
   { file: "relay-search.trajectory.jsonl", label: "“Search mail” run", name: "relay.search_mail" },
+  { file: "relay-send-email.live.mcp.jsonl", label: "Live BrowserOps run (MCP)", name: "relay.send_email_live" },
 ];
 
 const REASON_LABEL: Record<string, string> = {
